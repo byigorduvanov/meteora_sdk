@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  node_helper:
+    build:
+      context: ./node_helper
+    env_file:
+      - .env
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    environment:
+      NODE_HELPER_URL: http://node_helper:4000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - node_helper
+    restart: unless-stopped
