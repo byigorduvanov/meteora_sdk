@@ -208,33 +208,40 @@ export async function enterPoolSdk(connection: Connection, poolAddress: string, 
 }
 
 export async function exitPoolSdk(connection: Connection, poolAddress: string, pct: number = 100) {
-  const kp = loadKeypair();
+  const kp   = loadKeypair();
   const pool = new PublicKey(poolAddress);
   const dlmm = await DLMM.create(connection, pool);
 
   const { userPositions } = await dlmm.getPositionsByUserAndLbPair(kp.publicKey);
-  const bps = Math.floor(pct * 100);
+  const bps = new BN(Math.floor(pct * 100));
+
   const results: Array<{ position: string; signature: string }> = [];
 
   for (const pos of userPositions) {
-    const bins = pos.positionData.positionBinData.map((b: any) => b.binId);
-    if (!bins.length) continue;
-    const txs = await dlmm.removeLiquidity({
-      position: pos.publicKey,
+    // ✅ Отримуємо гарантовано валідні межі бінів
+    const info = await readPositionBins(connection, poolAddress, pos.publicKey.toBase58())
+      .catch(() => null);
+    if (!info) continue;
+
+    const txOrTxs = await dlmm.removeLiquidity({
       user: kp.publicKey,
-      fromBinId: bins[0],
-      toBinId: bins[bins.length - 1],
-      liquiditiesBpsToRemove: bins.map(() => new BN(bps)),
-      shouldClaimAndClose: pct === 100,
+      position: pos.publicKey,
+      fromBinId: info.fromBinId,
+      toBinId: info.toBinId,
+      bps,                               // ✅ один BN на діапазон
+      shouldClaimAndClose: pct === 100,  // закриваємо при повному виході
     });
-    const arr = Array.isArray(txs) ? txs : [txs];
-    for (const tx of arr) {
+
+    const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs];
+    for (const tx of txs) {
       const sig = await sendAndConfirmTransaction(connection, tx, [kp]);
       results.push({ position: pos.publicKey.toBase58(), signature: sig });
     }
   }
+
   return { removedPct: pct, results };
 }
+
 
 export async function readPositionBins(connection: Connection, poolAddress: string, positionAddress: string) {
   const poolPk = new PublicKey(poolAddress);
