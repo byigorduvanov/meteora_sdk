@@ -1,6 +1,8 @@
 // node_helper/src/meteora.ts
 import { Connection, PublicKey } from "@solana/web3.js";
 import fetch from "node-fetch";
+import { Buffer } from "node:buffer";
+
 
 // ✅ надійний імпорт SDK у ESM-проекті
 import { createRequire } from "node:module";

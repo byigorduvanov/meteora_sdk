@@ -9,3 +9,14 @@ node .\dist\index.js
 
 backend
 cd backend
+
+вхід в пул
+$uri  = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/enter-auto"
+$body = @{ usdAmount=25; strategy="BidAsk"; upPct=10; side="tokenX"; slippageBps=100; dynamicSlippage=$true } | ConvertTo-Json
+Invoke-RestMethod -Method POST -Uri $uri -ContentType "application/json" -Body $body
+
+
+вихід з пулу
+$uri = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/exit-and-sell"
+$body = @{ pct=100; outMint="So11111111111111111111111111111111111111112"; slippageBps=100; dynamicSlippage=$true } | ConvertTo-Json
+Invoke-RestMethod -Method POST -Uri $uri -ContentType "application/json" -Body $body

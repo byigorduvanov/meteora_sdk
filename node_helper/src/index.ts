@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { PublicKey } from "@solana/web3.js";
+
 
 import express from "express";
 import cors from "cors";
@@ -148,3 +150,59 @@ app.post("/pool/:address/enter-auto", async (req, res) => {
     res.status(500).json({ error: e.message || String(e) });
   }
 });
+
+// +++ ADD to src/index.ts +++
+import { jupBuildAndSendSwap, jupQuoteMintToMint, WSOL_MINT } from "./jupiter.js";
+import { getAssociatedTokenAddress, getAccount } from "@solana/spl-token";
+
+// POST /pool/:address/exit-and-sell
+// Body: { pct?: number, position?: string, outMint?: string, slippageBps?: number, dynamicSlippage?: boolean }
+app.post("/pool/:address/exit-and-sell", async (req, res) => {
+  try {
+    const connection = getConnection();
+    const poolAddr   = req.params.address;
+    const pct        = typeof req.body?.pct === "number" ? req.body.pct : 100;
+    const position   = typeof req.body?.position === "string" ? req.body.position : undefined;
+    const outMint    = String(req.body?.outMint || WSOL_MINT);
+    const slippageBps     = Number(req.body?.slippageBps ?? 100);
+    const dynamicSlippage = req.body?.dynamicSlippage !== false;
+
+    // 1) Вихід із пулу: або з конкретної позиції, або з усіх у цьому пулі
+    let exitResult: any;
+    if (position) {
+      exitResult = await exitPositionSdk(connection, poolAddr, position, pct);
+    } else {
+      exitResult = await exitPoolSdk(connection, poolAddr, pct);
+    }
+
+    // 2) Дізнаємось mint X/Y пулу (через DLMM)
+    const Meteora = (await import("./meteora.js"));
+    const pool = await Meteora.createPool(connection as any, poolAddr);
+    const kp   = loadKeypair();
+    const mintX = pool.tokenX.publicKey;
+    const mintY = pool.tokenY.publicKey;
+
+    // 3) Прочитати реальні баланси X/Y і підготувати свопи на outMint
+    const plans: Array<{ inMint: PublicKey; amount: bigint }> = [];
+    for (const mint of [mintX, mintY]) {
+      const ata = await getAssociatedTokenAddress(mint, kp.publicKey);
+      const acc = await getAccount(connection, ata).catch(() => null);
+      const amt = acc?.amount ?? 0n;
+      if (amt > 0n) plans.push({ inMint: mint, amount: amt });
+    }
+
+    // 4) Продаємо кожен нуль-ненульовий залишок у outMint через Jupiter Lite
+    const swaps: Array<{ inMint: string; signature: string; rawIn: string }> = [];
+    for (const p of plans) {
+      if (p.inMint.toBase58() === outMint) continue; // вже потрібний mint
+      const quote = await jupQuoteMintToMint(p.inMint.toBase58(), outMint, Number(p.amount), slippageBps);
+      const { signature } = await jupBuildAndSendSwap(connection, loadKeypair(), quote, { dynamicSlippage });
+      swaps.push({ inMint: p.inMint.toBase58(), signature, rawIn: p.amount.toString() });
+    }
+
+    res.json({ ok: true, exit: exitResult, soldTo: outMint, swaps });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
