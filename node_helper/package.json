@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.29.0",
-    "@meteora-ag/dlmm": "^1.7.2",
+    "@meteora-ag/dlmm": "^1.7.3",
     "@solana/spl-token": "^0.4.13",
     "@solana/web3.js": "^1.98.4",
     "bn.js": "^5.2.2",
@@ -21,6 +21,10 @@
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.1",
     "tsx": "^4.19.1",
     "typescript": "^5.5.4"
   }

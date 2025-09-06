@@ -11,6 +11,7 @@ import {
 } from "./meteora.js";
 import { loadKeypair } from "./wallet.js";
 import { enterPoolSdk, exitPoolSdk, exitPositionSdk, readPositionBins} from "./sdk_liquidity.js";
+import { enterAutoUsd } from "./sdk_liquidity.js";
 
 const app = express();
 app.use(cors());
@@ -25,7 +26,7 @@ app.get("/wallet/address", (_req, res) => {
 
 app.get("/pairs", async (req, res) => {
   try {
-    const data = await listPairsFromAPI();
+    const data = (await listPairsFromAPI()) as any[];
     const q = (req.query.q as string)?.toLowerCase();
     const filtered = q
       ? data.filter((p: any) =>
@@ -131,3 +132,19 @@ app.post("/position/:position/exit-sdk", async (req, res) => {
   }
 });
 
+app.post("/pool/:address/enter-auto", async (req, res) => {
+  try {
+    const connection = getConnection();
+    const out = await enterAutoUsd(connection, req.params.address, {
+      usdAmount: Number(req.body?.usdAmount),
+      strategy: String(req.body?.strategy || "Spot") as any,       // "Spot" | "BidAsk" | "Curve"
+      upPct: Number(req.body?.upPct ?? 10),
+      side: (req.body?.side === "tokenY" ? "tokenY" : "tokenX"),
+      slippageBps: Number(req.body?.slippageBps ?? 100),
+      dynamicSlippage: req.body?.dynamicSlippage !== false,
+    });
+    res.json(out);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
