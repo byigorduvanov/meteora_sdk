@@ -206,3 +206,22 @@ app.post("/pool/:address/exit-and-sell", async (req, res) => {
   }
 });
 
+// --- ADD to src/index.ts ---
+import { enterAutoSol } from "./sdk_liquidity.js";
+
+app.post("/pool/:address/enter-auto-sol", async (req, res) => {
+  try {
+    const connection = getConnection();
+    const out = await enterAutoSol(connection, req.params.address, {
+      solTotal: Number(req.body?.solTotal),             // напр. 0.1
+      ratio: req.body?.ratio,                           // "50:50" або 50
+      strategy: String(req.body?.strategy || "BidAsk") as any, // "Spot" | "BidAsk" | "Curve"
+      upPct: Number(req.body?.upPct ?? 10),
+      slippageBps: Number(req.body?.slippageBps ?? 100),
+      dynamicSlippage: req.body?.dynamicSlippage !== false,
+    });
+    res.json(out);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
