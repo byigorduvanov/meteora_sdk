@@ -11,8 +11,16 @@ backend
 cd backend
 
 вхід в пул
-$uri  = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/enter-auto"
-$body = @{ usdAmount=25; strategy="BidAsk"; upPct=10; side="tokenX"; slippageBps=100; dynamicSlippage=$true } | ConvertTo-Json
+# Вхід у пул за SOL-бюджетом і співвідношенням
+$uri  = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/enter-auto-sol"
+$body = @{
+  solTotal = 0.1;             # загальний розмір позиції в SOL
+  ratio = "50:50";            # або 50 — % у монету
+  strategy = "BidAsk";        # "Spot" | "BidAsk" | "Curve"
+  upPct = 12;
+  slippageBps = 100;
+  dynamicSlippage = $true
+} | ConvertTo-Json
 Invoke-RestMethod -Method POST -Uri $uri -ContentType "application/json" -Body $body
 
 
