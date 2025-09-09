@@ -1,24 +1,25 @@
-version: "3.8"
-
 services:
-  node_helper:
+  node-helper:
     build:
       context: ./node_helper
-    env_file:
-      - .env
+      dockerfile: Dockerfile
     ports:
-      - "4000:4000"
-    restart: unless-stopped
-
-  backend:
-    build:
-      context: ./backend
+      - "${PORT-4000}:4000"
     env_file:
-      - .env
+      - ./node_helper/.env
     environment:
-      NODE_HELPER_URL: http://node_helper:4000
-    ports:
-      - "8000:8000"
-    depends_on:
-      - node_helper
+      # Можеш перевизначити за потреби
+      - PORT=${PORT-4000}
+      - RPC_URL=${RPC_URL-https://api.mainnet-beta.solana.com}
+      - REGISTER_POSITION_URL=${REGISTER_POSITION_URL-http://localhost:4000/api/register-position}
+      - POSITION_LOOKUP_URL=${POSITION_LOOKUP_URL-http://localhost:4000/api/lookup}
+      - KEYPAIR_PATH=${KEYPAIR_PATH-/app/id.json}
+    volumes:
+      # Підмонтуємо keypair (read-only). Замінй шлях на свій, якщо треба.
+      - ${KEYPAIR_HOST_PATH-$HOME/.config/solana/id.json}:/app/id.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT-4000}/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     restart: unless-stopped
