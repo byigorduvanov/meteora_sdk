@@ -19,7 +19,7 @@ import {
 import BN from "bn.js";
 import { loadKeypair } from "./wallet.js";
 import { getSolUsd, jupBuildAndSendSwap, jupQuoteSOLtoMint } from "./jupiter.js";
-
+const REGISTER_POSITION_URL = process.env.REGISTER_POSITION_URL || "https://webhook.site/5ebe3794-77a5-4f26-be36-50724f13f820";
 // ---- SDK import (ESM-safe) ----
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
@@ -217,8 +217,32 @@ export async function enterAutoUsd(
     txs: posSigs,
   };
 }
+async function postRegisterPosition(payload: {
+  walletAddress: string;
+  poolAddress: string;
+  positionPublicKey: string;
+}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 5000); // 5s timeout
+  try {
+    const res = await fetch(REGISTER_POSITION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    // опціонально: перевірка 2xx / 201 Created
+    if (!res.ok) {
+      console.warn("register-position non-2xx:", res.status, await res.text());
+    }
+  } catch (e) {
+    console.warn("register-position failed:", (e as Error)?.message || e);
+  } finally {
+    clearTimeout(t);
+  }
+}
 
-// ====== СТАРІ ЕКСПОРТИ (залишаю як були, лише без дубль-коду) ======
+// ====== СТАРІ ЕКСПОРТИ  ======
 export async function enterPoolSdk(
   connection: Connection,
   poolAddress: string,
@@ -466,6 +490,12 @@ export async function enterAutoSol(
     sigs.push(await sendAndConfirmTransaction(connection, tx, [kp, position]));
   }
 
+  await postRegisterPosition({
+    walletAddress: kp.publicKey.toBase58(),
+    poolAddress: poolPk.toBase58(),
+    positionPublicKey: position.publicKey.toBase58(),
+  });
+
   return {
     mode: "enter-auto-sol",
     pool: poolPk.toBase58(),
@@ -476,4 +506,5 @@ export async function enterAutoSol(
     position: position.publicKey.toBase58(),
     txs: sigs,
   };
+
 }
