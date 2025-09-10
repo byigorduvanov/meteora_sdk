@@ -1,3 +1,4 @@
+// src/server.ts (або де в тебе розміщений HTTP-сервер)
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
 import cors from "cors";
@@ -61,9 +62,7 @@ app.post(
       });
 
       // реєструємо позицію локально (для автопошуку пулу під час виходу)
-      try {
-        positionToPool.set(out.position, out.pool);
-      } catch { /* ignore */ }
+      positionToPool.set(out.position, out.pool);
 
       res.json(out);
     } catch (e: any) {
@@ -73,17 +72,16 @@ app.post(
 );
 
 /** ===== 1a) Локальний API для реєстрації позиції ===== */
-app.post(
-  "/api/register-position",
-  (req: Request<{}, any, RegisterBody>, res: Response) => {
-    const { walletAddress = "", poolAddress = "", positionPublicKey = "" } = req.body ?? {};
-    if (!walletAddress || !poolAddress || !positionPublicKey) {
-      return res.status(400).json({ error: "walletAddress, poolAddress, positionPublicKey are required" });
-    }
-    positionToPool.set(positionPublicKey, poolAddress);
-    return res.status(201).json({ ok: true });
+app.post("/api/register-position", (req: Request<{}, any, RegisterBody>, res: Response) => {
+  const { walletAddress = "", poolAddress = "", positionPublicKey = "" } = req.body ?? {};
+  if (!walletAddress || !poolAddress || !positionPublicKey) {
+    return res
+      .status(400)
+      .json({ error: "walletAddress, poolAddress, positionPublicKey are required" });
   }
-);
+  positionToPool.set(positionPublicKey, poolAddress);
+  return res.status(201).json({ ok: true });
+});
 
 /** ===== 1b) Локальний API для пошуку пулу за позицією ===== */
 app.get("/api/lookup", (req: Request<{}, any, any, { position?: string }>, res: Response) => {
@@ -157,7 +155,10 @@ app.post(
       const swaps: Array<{ inMint: string; signature: string; rawIn: string }> = [];
       for (const p of plans) {
         if (p.inMint.toBase58() === outMint) continue;
-        const quote = await jupQuoteMintToMint(p.inMint.toBase58(), outMint, Number(p.amount), slippageBps);
+        const rawAmount = Number(p.amount); // якщо боїшся переповнення — адаптуй jupQuoteMintToMint під string
+        if (!(rawAmount > 0)) continue;
+
+        const quote = await jupQuoteMintToMint(p.inMint.toBase58(), outMint, rawAmount, slippageBps);
         const { signature } = await jupBuildAndSendSwap(connection, kp, quote, { dynamicSlippage });
         swaps.push({ inMint: p.inMint.toBase58(), signature, rawIn: p.amount.toString() });
       }

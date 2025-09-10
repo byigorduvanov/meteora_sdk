@@ -6,33 +6,20 @@ export const LITE_JUP = "https://lite-api.jup.ag";
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 // ---- Types for APIs ----
-type PriceV3 = { data?: Record<string, { price?: number }> };
-type CoingeckoPrice = { solana: { usd: number } };
 type LiteSwapOk = { swapTransaction: string; lastValidBlockHeight: number };
 
-// ---- Price API v3 (Lite) ----
-export async function getSolUsd(): Promise<number> {
-  const r = await fetch(`${LITE_JUP}/price/v3?ids=${WSOL_MINT}`);
-
-  if (r.ok) {
-    const j = (await r.json()) as PriceV3;
-    const p = j?.data?.[WSOL_MINT]?.price;
-    if (typeof p === "number" && isFinite(p) && p > 0) return p;
-  }
-
-  // very simple fallback (Coingecko)
-  const cg = (await (
-    await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
-    )
-  ).json()) as CoingeckoPrice;
-  return cg.solana.usd;
+function toAmountString(a: number | bigint | string): string {
+  if (typeof a === "string") return a;
+  if (typeof a === "bigint") return a.toString();
+  if (!Number.isFinite(a)) throw new Error("amount is not finite");
+  // для сирих атомів/лампортів без дробової частини
+  return Math.trunc(a).toString();
 }
 
-// ---- Quote SOL(WSOL) -> outMint ----
+/** Quote: SOL(WSOL) -> outMint */
 export async function jupQuoteSOLtoMint(
   outMint: string,
-  lamportsIn: number,
+  lamportsIn: number | bigint | string,
   slippageBps = 100
 ) {
   const url =
@@ -40,17 +27,17 @@ export async function jupQuoteSOLtoMint(
     new URLSearchParams({
       inputMint: WSOL_MINT,
       outputMint: outMint,
-      amount: String(lamportsIn), // raw lamports
+      amount: toAmountString(lamportsIn), // raw lamports
       slippageBps: String(slippageBps),
       restrictIntermediateTokens: "true",
     });
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Jupiter quote failed: ${res.status}`);
-  return (await res.json()) as unknown; // залишаємо як unknown — споживач сам типізує
+  return (await res.json()) as unknown; // типізується на місці використання
 }
 
-// ---- Build & send swap ----
+/** Build & send swap */
 export async function jupBuildAndSendSwap(
   connection: Connection,
   kp: Keypair,
@@ -72,9 +59,7 @@ export async function jupBuildAndSendSwap(
   const body = (await res.json()) as Partial<LiteSwapOk> & { error?: unknown };
 
   if (!res.ok || !body?.swapTransaction) {
-    throw new Error(
-      `Jupiter swap build failed: ${JSON.stringify(body ?? {})}`
-    );
+    throw new Error(`Jupiter swap build failed: ${JSON.stringify(body ?? {})}`);
   }
 
   const raw = Buffer.from(body.swapTransaction, "base64");
@@ -98,11 +83,11 @@ export async function jupBuildAndSendSwap(
   return { signature: sig };
 }
 
-// +++ Mint -> Mint quote (додатково, як і було) +++
+/** Quote: Mint -> Mint */
 export async function jupQuoteMintToMint(
   inputMint: string,
   outputMint: string,
-  rawAmount: number,
+  rawAmount: number | bigint | string,
   slippageBps = 100
 ) {
   const url =
@@ -110,7 +95,7 @@ export async function jupQuoteMintToMint(
     new URLSearchParams({
       inputMint,
       outputMint,
-      amount: String(rawAmount),
+      amount: toAmountString(rawAmount), // сирі атоми inputMint
       slippageBps: String(slippageBps),
       restrictIntermediateTokens: "true",
     });
