@@ -1,4 +1,4 @@
-// src/server.ts (або де в тебе розміщений HTTP-сервер)
+// src/index.ts
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
 import cors from "cors";
@@ -7,7 +7,7 @@ import { getAssociatedTokenAddress, getAccount } from "@solana/spl-token";
 
 import { getConnection } from "./meteora.js";
 import { loadKeypair } from "./wallet.js";
-import { enterAutoSol, exitPositionSdk } from "./sdk_liquidity.js";
+import { enterAutoSol, exitPositionSdk, enterSplitMultiSol } from "./sdk_liquidity.js";
 import { jupBuildAndSendSwap, jupQuoteMintToMint, WSOL_MINT } from "./jupiter.js";
 
 /** ===== Типи для боді ===== */
@@ -22,6 +22,16 @@ type EnterAutoSolBody = {
   ratio?: string | number;
   strategy?: "Spot" | "BidAsk" | "Curve";
   upPct?: number;
+  slippageBps?: number;
+  dynamicSlippage?: boolean;
+};
+
+type EnterSplitMultiBody = {
+  solTotal?: number; // обов'язково
+  ratio?: string | number; // % у токен
+  strategy?: "Spot" | "BidAsk" | "Curve"; // обов'язково
+  upPct?: number; // обов'язково
+  downPct?: number; // обов'язково
   slippageBps?: number;
   dynamicSlippage?: boolean;
 };
@@ -46,7 +56,7 @@ const positionToPool = new Map<string, string>();
 /** Healthcheck */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/** ===== 1) ВХІД: SOL-бюджет + ratio ===== */
+/** ===== 1) ВХІД: SOL-бюджет + ratio (legacy) ===== */
 app.post(
   "/pool/:address/enter-auto-sol",
   async (req: Request<{ address: string }, any, EnterAutoSolBody>, res: Response) => {
@@ -62,6 +72,7 @@ app.post(
       });
 
       // реєструємо позицію локально (для автопошуку пулу під час виходу)
+      // тут повертається одна позиція
       positionToPool.set(out.position, out.pool);
 
       res.json(out);
@@ -71,7 +82,51 @@ app.post(
   }
 );
 
-/** ===== 1a) Локальний API для реєстрації позиції ===== */
+/** ===== 1a) НОВЕ: Split Multi-Range =====
+ * Користувач задає: solTotal, ratio, strategy, upPct, downPct
+ * UP покривається ТІЛЬКИ токен-частиною; DOWN — ТІЛЬКИ WSOL-частиною.
+ * Діапазони автоматично б’ються на кілька позицій під ліміт бінів.
+ */
+app.post(
+  "/pool/:address/enter-split-multi",
+  async (req: Request<{ address: string }, any, EnterSplitMultiBody>, res: Response) => {
+    try {
+      const connection = getConnection();
+      const solTotal = Number(req.body?.solTotal);
+      const ratio = req.body?.ratio;
+      const strategy = String(req.body?.strategy || "BidAsk") as "Spot" | "BidAsk" | "Curve";
+      const upPct = Number(req.body?.upPct);
+      const downPct = Number(req.body?.downPct);
+      const slippageBps = Number(req.body?.slippageBps ?? 100);
+      const dynamicSlippage = req.body?.dynamicSlippage !== false;
+
+      if (!(solTotal > 0)) throw new Error("solTotal must be > 0");
+      if (!Number.isFinite(upPct) || !Number.isFinite(downPct))
+        throw new Error("upPct and downPct are required numbers.");
+
+      const out = await enterSplitMultiSol(connection, req.params.address, {
+        solTotal,
+        ratio,
+        strategy,
+        upPct,
+        downPct,
+        slippageBps,
+        dynamicSlippage,
+      });
+
+      // зареєструємо всі створені позиції (up/down)
+      for (const p of out.created ?? []) {
+        positionToPool.set(p.position, out.pool);
+      }
+
+      res.json(out);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  }
+);
+
+/** ===== API для реєстрації позиції вручну ===== */
 app.post("/api/register-position", (req: Request<{}, any, RegisterBody>, res: Response) => {
   const { walletAddress = "", poolAddress = "", positionPublicKey = "" } = req.body ?? {};
   if (!walletAddress || !poolAddress || !positionPublicKey) {
@@ -83,7 +138,7 @@ app.post("/api/register-position", (req: Request<{}, any, RegisterBody>, res: Re
   return res.status(201).json({ ok: true });
 });
 
-/** ===== 1b) Локальний API для пошуку пулу за позицією ===== */
+/** ===== API для пошуку пулу за позицією ===== */
 app.get("/api/lookup", (req: Request<{}, any, any, { position?: string }>, res: Response) => {
   const position = String(req.query?.position || "");
   const pool = positionToPool.get(position);

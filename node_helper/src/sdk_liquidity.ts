@@ -43,6 +43,19 @@ function toAtoms(uiAmount: number, decimals: number): BN {
   return new BN(atoms < 0 ? 0 : atoms);
 }
 
+function fromAtomsToUi(atoms: bigint | number, decimals: number): number {
+  const n = typeof atoms === "bigint" ? Number(atoms) : atoms;
+  return n / Math.pow(10, decimals);
+}
+
+function bnMin(a: BN, b: BN) {
+  return a.gt(b) ? b : a;
+}
+
+function bnMax(a: BN, b: BN) {
+  return a.gt(b) ? a : b;
+}
+
 // Обгортання SOL → WSOL (для частки бюджету, що йде в “SOL-сторону”)
 async function ensureWsolLamports(
   connection: Connection,
@@ -179,7 +192,9 @@ export async function exitPositionSdk(
   };
 }
 
-// ====== PUBLIC: Вхід у пул за SOL-бюджетом і співвідношенням ======
+/** =========================
+ *  ENTER: Single auto range (legacy)
+ *  ========================= */
 export async function enterAutoSol(
   connection: Connection,
   poolAddress: string,
@@ -311,5 +326,291 @@ export async function enterAutoSol(
     range: { minBinId: lowerId, maxBinId: upperId, upPct },
     position: position.publicKey.toBase58(),
     txs: sigs,
+  };
+}
+
+/** =========================
+ *  ENTER: Split multi (нове ТЗ)
+ *  ========================= */
+type SplitMultiParams = {
+  solTotal: number; // загальний бюджет у SOL
+  ratio?: string | number; // % у токен (50 => 50% у токен, 50% у SOL/WSOL)
+  strategy: "Spot" | "BidAsk" | "Curve";
+  upPct: number; // наприклад 80
+  downPct: number; // наприклад 70
+  slippageBps?: number;
+  dynamicSlippage?: boolean;
+};
+
+/** Розбиває суцільний діапазон [fromId..toId] на сегменти не довші за maxSpan. */
+function segmentRange(fromId: number, toId: number, maxSpan: number): Array<{ minBinId: number; maxBinId: number; bins: number }> {
+  const segments: Array<{ minBinId: number; maxBinId: number; bins: number }> = [];
+  if (fromId > toId) return segments;
+  let start = fromId;
+  while (start <= toId) {
+    const end = Math.min(start + maxSpan, toId);
+    const bins = Math.max(0, end - start + 1);
+    segments.push({ minBinId: start, maxBinId: end, bins });
+    start = end + 1;
+  }
+  return segments;
+}
+
+/** Перетворює % → таргетні binId відносно активної ціни. */
+async function computeTargetIds(dlmm: any, upPct: number, downPct: number) {
+  await dlmm.refetchStates();
+  const active = await dlmm.getActiveBin(); // {binId, price}
+  const P = Number(active.price);
+
+  const upperPrice = P * (1 + upPct / 100);
+  const lowerPrice = P * (1 - downPct / 100);
+
+  const upperId = dlmm.getBinIdFromPrice(upperPrice, false);
+  const lowerId = dlmm.getBinIdFromPrice(lowerPrice, false);
+
+  return { activeId: active.binId, upperId, lowerId, activePrice: P };
+}
+
+/** Пропорційний розподіл BN-сум за кількістю бінів із обрізанням похибок на останньому сегменті. */
+function splitAmountAcrossSegments(total: BN, segments: Array<{ bins: number }>): BN[] {
+  if (!segments.length) return [];
+  const binsTotal = segments.reduce((s, x) => s + x.bins, 0);
+  if (binsTotal <= 0) return segments.map(() => new BN(0));
+
+  const shares: BN[] = [];
+  let acc = new BN(0);
+  for (let i = 0; i < segments.length; i++) {
+    if (i === segments.length - 1) {
+      shares.push(total.sub(acc)); // останньому — все, що залишилось
+    } else {
+      const part = total.muln(segments[i].bins).divn(binsTotal);
+      shares.push(part);
+      acc = acc.add(part);
+    }
+  }
+  return shares;
+}
+
+/**
+ * Відкриває СУМІСНИЙ діапазон: +upPct (виключно за рахунок токен-частини), і –downPct (виключно за рахунок WSOL-частини),
+ * автоматично б’є на кілька позицій по ліміту бінів.
+ */
+export async function enterSplitMultiSol(
+  connection: Connection,
+  poolAddress: string,
+  params: SplitMultiParams
+) {
+  const {
+    solTotal,
+    ratio,
+    strategy,
+    upPct,
+    downPct,
+    slippageBps = 100,
+    dynamicSlippage = true,
+  } = params;
+
+  if (!(solTotal > 0)) throw new Error("solTotal must be > 0");
+  if (!(upPct > 0) && !(downPct > 0)) throw new Error("Both upPct and downPct are 0 — nothing to do.");
+
+  // Парсер ratio → % у токен
+  function parseRatioToTokenPct(r?: string | number): number {
+    if (typeof r === "number") return Math.max(0, Math.min(100, r));
+    if (!r) return 50;
+    const s = String(r).trim();
+    const m = s.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+    if (m) {
+      const a = parseFloat(m[1]);
+      const b = parseFloat(m[2]);
+      if (a + b > 0) return Math.round((b / (a + b)) * 100); // SOL:Token -> % у Token
+    }
+    const n = Number(s);
+    if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+    return 50;
+  }
+
+  const kp = loadKeypair();
+  const poolPk = new PublicKey(poolAddress);
+  const dlmm = await DLMM.create(connection, poolPk);
+
+  // Визначаємо сторони пари
+  const isXwsol = dlmm.tokenX.publicKey.toBase58() === NATIVE_MINT.toBase58();
+  const isYwsol = dlmm.tokenY.publicKey.toBase58() === NATIVE_MINT.toBase58();
+  if (!isXwsol && !isYwsol) throw new Error("Pool is not SOL-paired (WSOL not found).");
+
+  const tokenMint = new PublicKey(isXwsol ? dlmm.tokenY.publicKey : dlmm.tokenX.publicKey);
+  const tokenInfo = await getMint(connection, tokenMint);
+  const tokenDecimals = tokenInfo.decimals;
+
+  // === 1) Budget split & swaps ===
+  const lamportsTotal = Math.floor(solTotal * 1e9);
+  const pctToToken = parseRatioToTokenPct(ratio);
+  const toTokenLamports = Math.floor((lamportsTotal * pctToToken) / 100);
+  const toWsolLamports = lamportsTotal - toTokenLamports;
+
+  // swap частина → TOKEN
+  if (toTokenLamports > 0) {
+    const quote = await jupQuoteSOLtoMint(tokenMint.toBase58(), toTokenLamports, slippageBps);
+    await jupBuildAndSendSwap(connection, kp, quote, { dynamicSlippage });
+  }
+  // wrap частина → WSOL
+  if (toWsolLamports > 0) {
+    await ensureWsolLamports(connection, kp, toWsolLamports);
+  }
+
+  // === 2) Get balances ===
+  const tokenAta = await getAssociatedTokenAddress(tokenMint, kp.publicKey);
+  const tokenAcc = await getAccount(connection, tokenAta).catch(() => null);
+  const tokenRaw = tokenAcc?.amount ?? 0n; // bigint
+  const tokenUi = fromAtomsToUi(tokenRaw, tokenDecimals);
+
+  const wsolAta = await getAssociatedTokenAddress(NATIVE_MINT, kp.publicKey);
+  const wsolAcc = await getAccount(connection, wsolAta).catch(() => null);
+  const wsolRaw = wsolAcc?.amount ?? 0n;
+  const wsolUi = fromAtomsToUi(wsolRaw, 9);
+
+  // === 3) Target binIds and segmentation ===
+  const { activeId, upperId, lowerId, activePrice } = await computeTargetIds(dlmm, upPct, downPct);
+
+  // обмеження на довжину позиції в бінах
+  const maxSpan = Math.max(1, getMaxBinsPerPosition() - 1);
+
+  // UP segments: (activeId .. upperId)
+  const upFrom = Math.max(activeId + 1, activeId); // починаємо з activeId (включно), щоб покрити й поточний
+  const upSegments = upperId > activeId ? segmentRange(activeId, upperId, maxSpan) : [];
+
+  // DOWN segments: (lowerId .. activeId)
+  const downSegments = lowerId < activeId ? segmentRange(lowerId, activeId, maxSpan) : [];
+
+  // === 4) Allocate amounts per side ===
+  // ВГОРУ — тільки TOKEN; ВНИЗ — тільки WSOL.
+  const tokenTotalBN = toAtoms(tokenUi, tokenDecimals);
+  const wsolTotalBN = toAtoms(wsolUi, 9);
+
+  const upShares = splitAmountAcrossSegments(tokenTotalBN, upSegments);
+  const downShares = splitAmountAcrossSegments(wsolTotalBN, downSegments);
+
+  // === 5) Strategy enum ===
+  const strategyType =
+    strategy === "BidAsk"
+      ? StrategyType.BidAsk
+      : strategy === "Curve"
+      ? StrategyType.Curve
+      : StrategyType.Spot;
+
+  // === 6) Create positions ===
+  type CreatedPos = {
+    side: "up" | "down";
+    minBinId: number;
+    maxBinId: number;
+    bins: number;
+    position: string;
+    allocatedTokenAtoms?: string;
+    allocatedWsolAtoms?: string;
+    txs: string[];
+  };
+
+  const created: CreatedPos[] = [];
+
+  // helper: create one position with single-sided funds
+  async function createSingleSidedPosition(
+    minBinId: number,
+    maxBinId: number,
+    side: "up" | "down",
+    amountBN: BN
+  ) {
+    if (amountBN.lten(0)) return null;
+
+    const position = Keypair.generate();
+    // якщо WSOL зліва (X) — X це 9 dec; якщо WSOL справа (Y) — Y це 9 dec.
+
+    // ВГОРУ вкладаємо TOKEN (не WSOL)
+    // ВНИЗ вкладаємо WSOL (не TOKEN)
+    const totalXAmount =
+      side === "up"
+        ? (isXwsol ? new BN(0) : amountBN) // якщо token = X -> даємо X; якщо token = Y -> 0
+        : (isXwsol ? amountBN : new BN(0)); // DOWN: даємо WSOL на тій осі, де WSOL
+
+    const totalYAmount =
+      side === "up"
+        ? (isXwsol ? amountBN : new BN(0)) // якщо token = Y -> даємо Y; якщо token = X -> 0
+        : (isXwsol ? new BN(0) : amountBN); // DOWN: протилежна гілка для WSOL
+
+    const txOrTxs = await dlmm.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: position.publicKey,
+      user: kp.publicKey,
+      totalXAmount,
+      totalYAmount,
+      strategy: { minBinId, maxBinId, strategyType },
+    });
+
+    const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs];
+    const sigs: string[] = [];
+    for (const tx of txs) {
+      sigs.push(await sendAndConfirmTransaction(connection, tx, [kp, position]));
+    }
+
+    await postRegisterPosition({
+      walletAddress: kp.publicKey.toBase58(),
+      poolAddress: poolPk.toBase58(),
+      positionPublicKey: position.publicKey.toBase58(),
+    });
+
+    const rec: CreatedPos = {
+      side,
+      minBinId,
+      maxBinId,
+      bins: maxBinId - minBinId + 1,
+      position: position.publicKey.toBase58(),
+      allocatedTokenAtoms: side === "up" ? amountBN.toString() : undefined,
+      allocatedWsolAtoms: side === "down" ? amountBN.toString() : undefined,
+      txs: sigs,
+    };
+    return rec;
+  }
+
+  // створюємо UP
+  for (let i = 0; i < upSegments.length; i++) {
+    const seg = upSegments[i];
+    const share = upShares[i] ?? new BN(0);
+    const rec = await createSingleSidedPosition(seg.minBinId, seg.maxBinId, "up", share);
+    if (rec) created.push(rec);
+  }
+  // створюємо DOWN
+  for (let i = 0; i < downSegments.length; i++) {
+    const seg = downSegments[i];
+    const share = downShares[i] ?? new BN(0);
+    const rec = await createSingleSidedPosition(seg.minBinId, seg.maxBinId, "down", share);
+    if (rec) created.push(rec);
+  }
+
+  // Підсумки
+  const upBinsTotal = upSegments.reduce((s, x) => s + x.bins, 0);
+  const downBinsTotal = downSegments.reduce((s, x) => s + x.bins, 0);
+
+  return {
+    mode: "enter-split-multi",
+    pool: poolPk.toBase58(),
+    strategy,
+    ratioPctToToken: pctToToken,
+    price: {
+      active: activePrice,
+      targets: { upPct, downPct },
+    },
+    limits: {
+      maxBinsPerPosition: getMaxBinsPerPosition(),
+    },
+    resources: {
+      tokenUi, // пішло на UP
+      wsolUi,  // пішло на DOWN
+    },
+    coverage: {
+      activeId,
+      upperId,
+      lowerId,
+      up: { segments: upSegments, binsTotal: upBinsTotal },
+      down: { segments: downSegments, binsTotal: downBinsTotal },
+    },
+    created,
   };
 }
