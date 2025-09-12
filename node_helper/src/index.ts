@@ -44,6 +44,14 @@ type ExitAndSellBody = {
   pool?: string; // можна не передавати, якщо працює POSITION_LOOKUP_URL або локальний реєстр
 };
 
+type ExitAllBody = {
+  pct?: number;                  // default 100
+  outMint?: string;              // default WSOL_MINT
+  slippageBps?: number;          // default 100
+  dynamicSlippage?: boolean;     // default true
+};
+
+
 type LookupResponse = { poolAddress?: string };
 
 const app = express();
@@ -169,35 +177,54 @@ async function resolvePoolByPosition(positionPk: string): Promise<string | null>
 }
 
 app.post(
-  "/position/:position/exit-and-sell",
-  async (req: Request<{ position: string }, any, ExitAndSellBody>, res: Response) => {
+  "/pool/:address/exit-all-and-sell",
+  async (req: Request<{ address: string }, any, ExitAllBody>, res: Response) => {
     try {
       const connection = getConnection();
-      const position = String(req.params.position);
+      const poolAddr = String(req.params.address);
       const pct = typeof req.body?.pct === "number" ? req.body.pct : 100;
       const outMint = String(req.body?.outMint || WSOL_MINT);
       const slippageBps = Number(req.body?.slippageBps ?? 100);
       const dynamicSlippage = req.body?.dynamicSlippage !== false;
 
-      // 1) визначити пул (з body, локального реєстру або зовнішнього lookup)
-      const poolAddr = String(req.body?.pool || (await resolvePoolByPosition(position)) || "");
-      if (!poolAddr) {
-        throw new Error(
-          "Pool address is required (provide in body.pool, або налаштуй POSITION_LOOKUP_URL / користуйся локальним реєстром)."
-        );
+      if (!poolAddr) throw new Error("Pool address is required in URL.");
+
+      // 1) Знайти всі позиції цього пулу, про які ми знаємо (локальний реєстр)
+      const positions: string[] = [];
+      for (const [pos, pool] of positionToPool.entries()) {
+        if (pool === poolAddr) positions.push(pos);
+      }
+      if (!positions.length) {
+        return res.status(404).json({
+          error:
+            "No known positions for this pool in local registry. " +
+            "Створи позиції через цей сервіс, або додай реєстрацію / зовнішній lookup.",
+        });
       }
 
-      // 2) remove liquidity конкретно з цієї позиції
-      const exitResult = await exitPositionSdk(connection, poolAddr, position, pct);
+      // 2) Закрити всі позиції
+      const exits: Array<{
+        position: string;
+        removedPct: number;
+        fromBinId: number;
+        toBinId: number;
+        signatures: string[];
+      }> = [];
+      for (const pos of positions) {
+        const out = await exitPositionSdk(connection, poolAddr, pos, pct);
+        exits.push(out);
+        // При бажанні — можеш одразу видаляти з реєстру:
+        // positionToPool.delete(pos);
+      }
 
-      // 3) дізнаємось mint X/Y через DLMM pool (SDK)
+      // 3) Прочитати мейн-міни X/Y пулу
       const Meteora = await import("./meteora.js");
       const pool = await Meteora.createPool(connection as any, poolAddr);
       const kp = loadKeypair();
       const mintX = pool.tokenX.publicKey;
       const mintY = pool.tokenY.publicKey;
 
-      // 4) читаємо залишки X/Y на ATA
+      // 4) Прочитати залишки і скласти план свопів у outMint
       const plans: Array<{ inMint: PublicKey; amount: bigint }> = [];
       for (const mint of [mintX, mintY]) {
         const ata = await getAssociatedTokenAddress(mint, kp.publicKey);
@@ -206,24 +233,26 @@ app.post(
         if (amt > 0n) plans.push({ inMint: mint, amount: amt });
       }
 
-      // 5) продаємо залишки у outMint через Jupiter (/quote -> /swap)
+      // 5) Продати все в outMint через Jupiter
       const swaps: Array<{ inMint: string; signature: string; rawIn: string }> = [];
       for (const p of plans) {
-        if (p.inMint.toBase58() === outMint) continue;
-        const rawAmount = Number(p.amount); // якщо боїшся переповнення — адаптуй jupQuoteMintToMint під string
+        const inMintStr = p.inMint.toBase58();
+        if (inMintStr === outMint) continue;
+        const rawAmount = Number(p.amount);
         if (!(rawAmount > 0)) continue;
 
-        const quote = await jupQuoteMintToMint(p.inMint.toBase58(), outMint, rawAmount, slippageBps);
+        const quote = await jupQuoteMintToMint(inMintStr, outMint, rawAmount, slippageBps);
         const { signature } = await jupBuildAndSendSwap(connection, kp, quote, { dynamicSlippage });
-        swaps.push({ inMint: p.inMint.toBase58(), signature, rawIn: p.amount.toString() });
+        swaps.push({ inMint: inMintStr, signature, rawIn: p.amount.toString() });
       }
 
-      res.json({ ok: true, exit: exitResult, soldTo: outMint, swaps });
+      res.json({ ok: true, pool: poolAddr, closed: exits.length, exits, soldTo: outMint, swaps });
     } catch (e: any) {
       res.status(500).json({ error: e.message || String(e) });
     }
   }
 );
+
 
 const port = Number(process.env.PORT || 4000);
 app.listen(port, () => {

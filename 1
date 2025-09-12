@@ -12,21 +12,25 @@ docker compose up --build -d
 
 
 вхід в пул
-# Вхід у пул за SOL-бюджетом і співвідношенням
-$uri  = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/enter-auto-sol"
+Invoke-RestMethod http://localhost:4000/health
 $body = @{
-  solTotal = 0.1;             # загальний розмір позиції в SOL
-  ratio = "50:50";            # або 50 — % у монету
-  strategy = "BidAsk";        # "Spot" | "BidAsk" | "Curve"
-  upPct = 12;
-  slippageBps = 100;
-  dynamicSlippage = $true
+  solTotal       = 0.12
+  ratio          = "50:50"
+  strategy       = "BidAsk"
+  upPct          = 80
+  downPct        = 70
+  slippageBps    = 100
+  dynamicSlippage= $true
 } | ConvertTo-Json
-Invoke-RestMethod -Method POST -Uri $uri -ContentType "application/json" -Body $body
+Invoke-RestMethod `
+  -Method POST `
+  -Uri "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/enter-split-multi" `
+  -ContentType "application/json" `
+  -Body $body
 
 
 вихід з пулу
-$pos  = "9cbzxTRysLDcq1rtueSXPi9vC9L1JadocUCwR11XyZP6"   # адреса позиції
+$pos  = "FNumZgm1u8MV4fBTHxvvnemc4dATsf8zNQsrLfPJqCjJ"   # адреса позиції
 $uri2 = "http://localhost:4000/position/$pos/exit-and-sell"
 $body2 = @{
   pct = 100
