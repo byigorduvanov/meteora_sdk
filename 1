@@ -30,13 +30,11 @@ Invoke-RestMethod `
 
 
 вихід з пулу
-$pos  = "FNumZgm1u8MV4fBTHxvvnemc4dATsf8zNQsrLfPJqCjJ"   # адреса позиції
-$uri2 = "http://localhost:4000/position/$pos/exit-and-sell"
-$body2 = @{
+$uri = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/exit-all-and-sell"
+$body = @{
   pct = 100
-  outMint = "So11111111111111111111111111111111111111112"
+  outMint = "So11111111111111111111111111111111111111112"  # WSOL
   slippageBps = 100
   dynamicSlippage = $true
-  pool = "6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf" #адреса пулу
 } | ConvertTo-Json
-Invoke-RestMethod -Method POST -Uri $uri2 -ContentType "application/json" -Body $body2
+Invoke-RestMethod -Method POST -Uri $uri -ContentType "application/json" -Body $body
