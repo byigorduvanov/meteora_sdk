@@ -30,7 +30,7 @@ const StrategyType: any = (Meteora?.StrategyType ?? DLMM?.StrategyType);
 // ====== конфіг ======
 const REGISTER_POSITION_URL =
   process.env.REGISTER_POSITION_URL ||
-  "https://webhook.site/5ebe3794-77a5-4f26-be36-50724f13f820/api/register-position";
+  "http://localhost:8081/api/register-position";
 
 // ====== helpers ======
 function getMaxBinsPerPosition(): number {
