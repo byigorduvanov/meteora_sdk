@@ -30,8 +30,13 @@ Invoke-RestMethod `
 
 
 вихід з пулу
-$uri = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/exit-all-and-sell"
+$uri = "http://localhost:4000/pool/6BadV51pfhJLywizLx3UNgt7Fgc1qaCn6NzrS4Ewidmf/exit-selected-and-sell"
 $body = @{
+  positions = @(
+    "PosPublicKey1Here",
+    "PosPublicKey2Here",
+    "PosPublicKey3Here"
+  )
   pct = 100
   outMint = "So11111111111111111111111111111111111111112"  # WSOL
   slippageBps = 100
