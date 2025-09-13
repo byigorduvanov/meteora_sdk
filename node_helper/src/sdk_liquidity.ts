@@ -30,7 +30,7 @@ const StrategyType: any = (Meteora?.StrategyType ?? DLMM?.StrategyType);
 // ====== конфіг ======
 const REGISTER_POSITION_URL =
   process.env.REGISTER_POSITION_URL ||
-  "http://localhost:8081/api/register-position";
+  "https://webhook.site/5ebe3794-77a5-4f26-be36-50724f13f820/api/register-position";
 
 // ====== helpers ======
 function getMaxBinsPerPosition(): number {
@@ -194,6 +194,29 @@ export async function exitPositionSdk(
     position: posPk.toBase58(),
     signatures,
   };
+}
+
+// ====== PUBLIC: батч-вихід з МАСИВУ позицій (за одним пулом) ======
+export async function exitPositionsBatchSdk(
+  connection: Connection,
+  poolAddress: string,
+  positions: string[],
+  pct: number = 100
+) {
+  const results: Array<{
+    removedPct: number;
+    fromBinId: number;
+    toBinId: number;
+    position: string;
+    signatures: string[];
+  }> = [];
+
+  for (const pos of positions || []) {
+    const out = await exitPositionSdk(connection, poolAddress, String(pos), pct);
+    results.push(out);
+  }
+
+  return results;
 }
 
 /** =========================

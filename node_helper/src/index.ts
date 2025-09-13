@@ -7,7 +7,7 @@ import { getAssociatedTokenAddress, getAccount } from "@solana/spl-token";
 
 import { getConnection } from "./meteora.js";
 import { loadKeypair } from "./wallet.js";
-import { enterAutoSol, exitPositionSdk, enterSplitMultiSol } from "./sdk_liquidity.js";
+import { enterAutoSol, exitPositionSdk, enterSplitMultiSol, exitPositionsBatchSdk } from "./sdk_liquidity.js";
 import { jupBuildAndSendSwap, jupQuoteMintToMint, WSOL_MINT } from "./jupiter.js";
 
 /** ===== Типи для боді ===== */
@@ -45,6 +45,14 @@ type ExitAndSellBody = {
 };
 
 type ExitAllBody = {
+  pct?: number;                  // default 100
+  outMint?: string;              // default WSOL_MINT
+  slippageBps?: number;          // default 100
+  dynamicSlippage?: boolean;     // default true
+};
+
+type ExitSelectedBody = {
+  positions?: string[];          // обов'язково
   pct?: number;                  // default 100
   outMint?: string;              // default WSOL_MINT
   slippageBps?: number;          // default 100
@@ -234,6 +242,61 @@ app.post(
       }
 
       // 5) Продати все в outMint через Jupiter
+      const swaps: Array<{ inMint: string; signature: string; rawIn: string }> = [];
+      for (const p of plans) {
+        const inMintStr = p.inMint.toBase58();
+        if (inMintStr === outMint) continue;
+        const rawAmount = Number(p.amount);
+        if (!(rawAmount > 0)) continue;
+
+        const quote = await jupQuoteMintToMint(inMintStr, outMint, rawAmount, slippageBps);
+        const { signature } = await jupBuildAndSendSwap(connection, kp, quote, { dynamicSlippage });
+        swaps.push({ inMint: inMintStr, signature, rawIn: p.amount.toString() });
+      }
+
+      res.json({ ok: true, pool: poolAddr, closed: exits.length, exits, soldTo: outMint, swaps });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  }
+);
+
+// ВИХІД: масив позицій для конкретного пулу + продаж у outMint
+app.post(
+  "/pool/:address/exit-selected-and-sell",
+  async (req: Request<{ address: string }, any, ExitSelectedBody>, res: Response) => {
+    try {
+      const connection = getConnection();
+      const poolAddr = String(req.params.address);
+      const positions = Array.isArray(req.body?.positions) ? req.body.positions : [];
+      const pct = typeof req.body?.pct === "number" ? req.body.pct : 100;
+      const outMint = String(req.body?.outMint || WSOL_MINT);
+      const slippageBps = Number(req.body?.slippageBps ?? 100);
+      const dynamicSlippage = req.body?.dynamicSlippage !== false;
+
+      if (!poolAddr) throw new Error("Pool address is required in URL.");
+      if (!positions.length) throw new Error("'positions' array is required in body.");
+
+      // 1) Закрити перелічені позиції
+      const exits = await exitPositionsBatchSdk(connection, poolAddr, positions, pct);
+
+      // 2) Прочитати мейн-міни X/Y пулу
+      const Meteora = await import("./meteora.js");
+      const pool = await Meteora.createPool(connection as any, poolAddr);
+      const kp = loadKeypair();
+      const mintX = pool.tokenX.publicKey;
+      const mintY = pool.tokenY.publicKey;
+
+      // 3) Прочитати залишки і скласти план свопів у outMint
+      const plans: Array<{ inMint: PublicKey; amount: bigint }> = [];
+      for (const mint of [mintX, mintY]) {
+        const ata = await getAssociatedTokenAddress(mint, kp.publicKey);
+        const acc = await getAccount(connection, ata).catch(() => null);
+        const amt = acc?.amount ?? 0n;
+        if (amt > 0n) plans.push({ inMint: mint, amount: amt });
+      }
+
+      // 4) Продати все в outMint через Jupiter
       const swaps: Array<{ inMint: string; signature: string; rawIn: string }> = [];
       for (const p of plans) {
         const inMintStr = p.inMint.toBase58();
